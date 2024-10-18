@@ -1,93 +1,170 @@
 import streamlit as st
 from langchain.chains import ConversationalRetrievalChain
+# from langchain_community.embeddings import OpenAIEmbeddings
+from langchain_openai import OpenAIEmbeddings
 from langchain_community.vectorstores import Chroma
-from langchain_openai import OpenAIEmbeddings, ChatOpenAI
+from langchain.schema import Document
+from langchain_openai import ChatOpenAI
 import streamlit.components.v1 as components
 
-
-# Set the page configuration as the first Streamlit command
-
+#from chromadb import Client  # Chroma client
+import pandas as pd
+#from langchain.schema import HumanMessage, AIMessage
+# Set the page configuration
 st.set_page_config(
-    page_title="FM bot",
+    page_title="AUBFM-BOT",
     page_icon='💬',
     # layout='wide'
 )
-# Paths
-LOCAL_VECTOR_STORE_DIR = "C:\\Users\\Abir\\Documents\\capstone project\\Data\\final_chroma"
-def load_documents_from_chroma(api_key):
-    # Initialize Chroma vector store
-    vectordb = Chroma(
-        persist_directory=LOCAL_VECTOR_STORE_DIR,
-        embedding_function=OpenAIEmbeddings(openai_api_key=api_key, model="text-embedding-3-small")
-    )
-    retriever = vectordb.as_retriever(search_type="mmr", k=4)
+
+
+# Function to create a list of Document objects from the CSV file
+def create_documents_from_csv(uploaded_file):
+    df = pd.read_csv(uploaded_file)  # Load the CSV as a pandas DataFrame
+    documents = []
+
+    # Iterate over each row in the CSV to create Document objects
+    for idx, row in df.iterrows():
+        question = row['Question']
+        answer = row['Answer']
+        page_content = f"Question: {question}\nAnswer: {answer}"
+        metadata = {"source": uploaded_file.name, "row": idx + 1}
+        doc = Document(metadata=metadata, page_content=page_content)
+        documents.append(doc)
+
+    return documents
+# Function to process the CSV and generate embeddings without persisting Chroma
+def load_documents_from_chroma(uploaded_file, api_key):
+    documents = create_documents_from_csv(uploaded_file)  # Create documents
+    embeddings = OpenAIEmbeddings(openai_api_key=api_key,model="text-embedding-3-small")  # Initialize OpenAI embeddings
+
+    # Create Chroma vector store in memory without persisting
+    chroma_vector = Chroma.from_documents(documents, embeddings)
+    retriever = chroma_vector.as_retriever(search_type="mmr", k=3)
     return retriever
 
+# Function to create a prompt based on query, history, and retrieved documents
 def create_prompt(query, history, retrieved_docs):
     if len(history) > 3:
-        history = history[-3:]  # Keep only the last 3 interactions
+        history = history[-3:]  # Keep only the last 5 interactions
+    # Create a structured prompt with the conversation history, current query, and retrieved context
     history_prompt = "\n".join([f"User: {msg[0]}\nBot: {msg[1]}" for msg in history])
     context = "\n".join([doc.page_content for doc in retrieved_docs])
     prompt = (
-        f"You are an expert assistant at the Faculty of Medicine, AUB. Answer to greetings..\n"
-        f"Here is the conversation so far:\n"
-        f"{history_prompt}\n\n"
-        f"Here are some relevant documents: {context}\n\n"
-        f"and here's the user's latest question: {query}\n\n"
-        f"Answer to the inquiry in a detailed professional and consistent tone using the relevant documents "
-        f"while being aware of the history. However, if none and only none of the relevant documents clearly answer/related to the question, or there's no information from the history to answer it respond with 'Sorry, I don't have an answer to your inquiry. Kindly check our website: https://www.aub.edu.lb/FM/Pages/default.aspx'."
+f"You are an expert assistant at the Faculty of Medicine, AUB. Greet the user and introduce yourself appropriately.\n"
+f"Here is the conversation history so far:\n"
+f"{history_prompt}\n\n"
+f"Here are some relevant documents: {context}\n\n"
+f"And here is the user's latest question: {query}\n\n"
+f"Answer the inquiry in a detailed, professional, and consistent tone, using the relevant documents and being aware of the conversation history. "
+f"However, if none of the relevant documents can answer the question or provide any related information, and there's nothing in the history to answer it, respond with: "
+f"'Sorry, I don't have an answer to your inquiry. Kindly check our website: https://www.aub.edu.lb/FM/Pages/default.aspx.'\n"
+f"If the question is a follow-up asking for more details on a previously asked question, and no related information is found, use the conversation history to provide an answer."
+
     )
     return prompt
 
-def query_llm(retriever, query, api_key):
+# Function to handle the query and interaction with the LLM
+def query_llm(retriever, query,api_key):
+    # Retrieve relevant documents using the updated method
     retrieved_docs = retriever.invoke(query)
+
+    # Create the prompt including the retrieved context
     prompt = create_prompt(query, st.session_state.messages, retrieved_docs)
 
+    # Use the prompt to query the LLM
     qa_chain = ConversationalRetrievalChain.from_llm(
-        llm=ChatOpenAI(model="gpt-4", api_key=api_key, temperature=0),
+        llm=ChatOpenAI(model="gpt-4o-mini", api_key=api_key, temperature=0),
         retriever=retriever,
         return_source_documents=True,
+
     )
-    result = qa_chain({'question': prompt, 'chat_history': []})
+    # result = qa_chain({'question': prompt, 'chat_history': []})
+    result = qa_chain.invoke({'question': prompt, 'chat_history': []})
+
     response = result['answer']
 
+    # Store the query and response in the session state
     st.session_state.messages.append((query, response))
     return response
 
+# Sidebar input for OpenAI API key and file upload
 def input_fields():
-    st.sidebar.header("Configuration")
-    st.session_state.openai_api_key = st.sidebar.text_input("OpenAI API Key", type="password")
+    with st.sidebar:
+        openai_api_key = st.text_input("Enter your OpenAI API Key", type="password")
+        uploaded_file = st.file_uploader("Upload a CSV file", type=["csv"])
+    return openai_api_key, uploaded_file
 
-def process_documents(api_key):
-    st.session_state.retriever = load_documents_from_chroma(api_key)
+# Processing the CSV and creating retriever from Chroma
+def process_documents(api_key, uploaded_file):
+    if uploaded_file and api_key:
+        # Initialize retriever from local Chroma vector store
+        retriever = load_documents_from_chroma(uploaded_file, api_key)
+        return retriever
+    return None
 
+# Boot process to load the retriever and display the chat interface
 def boot():
-    input_fields()
+    api_key, uploaded_file = input_fields()
+    retriever = process_documents(api_key, uploaded_file)
 
-    if "openai_api_key" in st.session_state and st.session_state.openai_api_key:
-        api_key = st.session_state.openai_api_key
-        process_documents(api_key)
+    if retriever:
+        st.session_state.retriever = retriever
+        st.success("Embeddings have been created and stored in-memory Chroma.")
 
+        # Initialize chat history if it doesn't exist
         if "messages" not in st.session_state:
             st.session_state.messages = []
 
+        # Display past conversation
         for message in st.session_state.messages:
             st.chat_message('you').write(message[0])
             st.chat_message('AUBFM BOT').write(message[1])
 
-        if query := st.chat_input():
-            st.chat_message("you").write(query)
-            response = query_llm(st.session_state.retriever, query, api_key)
-            st.chat_message("AUBFM BOT").write(response)
-    else:
-        st.warning("Please enter your OpenAI API Key in the sidebar.")
+        # Handle new input from the user
+        if query := st.chat_input("Ask a question"):
+            st.chat_message("you",avatar="https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcQPPQUMVStKOsQ3MVoy7SMgNsE8O-FqNETAJQ&s").write(query)
+            response = query_llm(st.session_state.retriever, query,api_key)
+            with st.chat_message('AUBFM BOT', avatar='https://alumni.aub.edu.lb/s/1716/images/gid2/editor/ProgressIndicator/FM_Emblem_638349910177900810.jpg'):
+                st.write(response)
+         #   st.chat_message("AUBFM BOT",avatar=st.image('C:\\Users\\Abir\\Documents\\capstone project\\Code\\chatbot_pycharm\\aubfm.jpeg')).write(response)
 
+    else:
+        st.warning("Please upload a CSV file and enter your OpenAI API key.")
+
+# Main function to handle the page navigation
 def main():
-    page = st.sidebar.selectbox("Select a page:", ["Introduction", "Chatbot"])
+
+    # Add a sidebar to select the page
+    # page = st.sidebar.selectbox("Select a page:", ["Introduction", "Chatbot"])
+    # st.sidebar.title("Pages")
+    st.sidebar.markdown(
+        """
+        <style>
+        .sidebar-title {
+            font-size: 20px;
+            font-weight: bold;
+            color: black;
+        }
+        .red-text {
+            color: red;
+        }
+        </style>
+        <div class="sidebar-title">Pages</div>
+        """,
+        unsafe_allow_html=True,
+    )
+    page = st.sidebar.radio("** **",["Introduction", "AUB-FM chatbot"],
+                            captions=[
+                                "About AUB-FM.",
+                                "QA bot",
+                            ],
+                            )
+
 
     if page == "Introduction":
         st.image("https://www.aub.edu.lb/fm/PublishingImages/AUB_Logo_FM_Horizontal_RGB.png", caption="",width=350)
-        # Render the HTML in Streamlit
+# Render the HTML in Streamlit
 
         # st.image("https://www.aub.edu.lb/fm/PublishingImages/AUB_Logo_FM_Horizontal_RGB.png", caption="",width=350)
         components.html(
@@ -215,13 +292,14 @@ def main():
 
 
 
-    elif page == "Chatbot":
+    elif page == "AUB-FM chatbot":
         st.header('AUB FM chatbot')
         #   st.write('[![view source code ](https://img.shields.io/badge/view_source_code-gray?logo=github)](https://github.com/shashankdeshpande/langchain-chatbot/blob/master/pages/2_%E2%AD%90_context_aware_chatbot.py)')
         with st.expander("Disclaimer"):
             st.write("""
-                While the chatbot aims to offer accurate and helpful responses, it might occasionally make **mistakes** or misinterpret your question. Please ensure you **double-check important details** and seek professional guidance when necessary.
-                """)
+            While the chatbot aims to offer accurate and helpful responses, it might occasionally make **mistakes** or misinterpret your question. Please ensure you **double-check important details** and seek professional guidance when necessary.
+            """)
+
         boot()
 
 if __name__ == '__main__':
